@@ -1,0 +1,100 @@
+import jax
+import jax.numpy as jnp
+import numpy as np
+import matplotlib.pyplot as plt
+import qutip
+from qutip import basis, sigmax, sigmaz, expect
+import qutip_qoc as qoc
+
+jax.config.update("jax_platform_name", "cpu")
+
+print("🌟 Démarrage : Qubit Idéal (Référentiel Tournant)...")
+
+# ==========================================
+# 1. SYSTÈME PHYSIQUE
+# ==========================================
+# rotating frame approximation
+omega_q = 0.0  
+
+H_drift = (omega_q / 2.0) * sigmaz() 
+H_c = sigmay()                       
+
+psi0 = basis(2, 1)     # start |1>
+psi_targ = basis(2, 0) # target |0>
+
+T_total = 1.0
+times = np.linspace(0, T_total, 200)
+
+@jax.jit
+def gaussian_jax(t, p, **kwargs):
+    return p[0] * jnp.exp(-(t - p[1])**2 / (2 * p[2]**2))
+
+def gaussian_numpy(t, p):
+    return p[0] * np.exp(-(t - p[1])**2 / (2 * p[2]**2))
+
+H_model = [H_drift, [H_c, gaussian_jax]]
+
+# ==========================================
+# 3. OPTIMISATION JOPT
+# ==========================================
+guess_params = [2.0, T_total / 2.0, 0.1]
+bounds = [(-10.0, 10.0), (0.0, T_total), (0.05, T_total)]
+
+print("🧠 Optimisation en cours...")
+res = qoc.optimize_pulses(
+    objectives=qoc.Objective(psi0, H_model, psi_targ),
+    control_parameters={"pulse_X": {"guess": guess_params, "bounds": bounds}},
+    tlist=times,
+    algorithm_kwargs={
+        "alg": "JOPT",
+        "fid_err_targ": 1e-6,
+        "max_iter": 500
+    }
+)
+
+# ==========================================
+# 4. RESULTS
+# ==========================================
+print(f"\n✅ Fidélité obtenue : {1 - res.fid_err:.6f}")
+
+opt_params = res.optimized_params[0]
+opt_pulse = gaussian_numpy(times, opt_params)
+
+opts = {"atol": 1e-10, "rtol": 1e-10}
+sim = qutip.mesolve([H_drift, [H_c, opt_pulse]], psi0, times, options=opts)
+
+pop_1 = expect(basis(2, 1) * basis(2, 1).dag(), sim.states)
+pop_0 = expect(basis(2, 0) * basis(2, 0).dag(), sim.states)
+
+plt.figure(figsize=(10, 8))
+
+plt.subplot(2, 1, 1)
+plt.plot(times, opt_pulse, 'purple', lw=2)
+plt.title("Pi impulsion")
+plt.grid(True, alpha=0.3)
+
+plt.subplot(2, 1, 2)
+plt.plot(times, pop_1, 'r', label='Start |1>', lw=2)
+plt.plot(times, pop_0, 'b', label='Target |0>', lw=2)
+plt.title(f"Dynamique : Transfert parfait (Fidélité = {1-res.fid_err:.5f})")
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+b = Bloch()
+
+# add_states not working
+expect_x = qutip.expect(qutip.sigmax(), sim.states)
+expect_y = qutip.expect(qutip.sigmay(), sim.states)
+expect_z = qutip.expect(qutip.sigmaz(), sim.states)
+b.add_points([expect_x, expect_y, expect_z], meth='s')
+
+vec_final = [expect_x[-1], expect_y[-1], expect_z[-1]]
+b.add_vectors(vec_final)
+b.show()
+print(f"📍 Coordonnées finales de la flèche :")
+print(f"   X = {expect_x[-1]:.4f}  (On veut 1.0000)")
+print(f"   Y = {expect_y[-1]:.4f}  (On veut 0.0000)")
+print(f"   Z = {expect_z[-1]:.4f}  (On veut 0.0000)")
